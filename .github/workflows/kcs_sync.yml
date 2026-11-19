@@ -1,0 +1,96 @@
+name: Sync KCS Issue to BookStack
+
+on:
+  issues:
+    types: [opened, edited, closed]
+
+jobs:
+  sync-to-bookstack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install marked library
+        run: npm install marked
+
+      - name: Create or Update BookStack Page
+        env:
+          BOOKSTACK_URL: ${{ secrets.BOOKSTACK_URL }}
+          BOOKSTACK_TOKEN_ID: ${{ secrets.BOOKSTACK_TOKEN_ID }}
+          BOOKSTACK_TOKEN_SECRET: ${{ secrets.BOOKSTACK_TOKEN_SECRET }}
+          BOOKSTACK_BOOK_ID: ${{ secrets.BOOKSTACK_BOOK_ID }}
+          ISSUE_ACTION: ${{ github.event.action }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          ISSUE_STATE: ${{ github.event.issue.state }}
+        run: |
+          node -e '
+          const { marked } = require("marked");
+
+          async function run() {
+            const baseUrl = process.env.BOOKSTACK_URL.replace(/\/$/, "");
+            const headers = {
+              "Authorization": `Token ${process.env.BOOKSTACK_TOKEN_ID}:${process.env.BOOKSTACK_TOKEN_SECRET}`,
+              "Content-Type": "application/json",
+              "bypass-tunnel-reminder": "true"
+            };
+
+            const bookId = Number(process.env.BOOKSTACK_BOOK_ID);
+            const issueNum = process.env.ISSUE_NUMBER;
+            const statusTag = process.env.ISSUE_STATE === "closed" ? "[Закрыто / Проверено]" : "[В работе]";
+            const pageTitle = `#${issueNum} ${process.env.ISSUE_TITLE} ${statusTag}`;
+
+            const fullMarkdown = `${process.env.ISSUE_BODY || ""}\n\n---\n**Ссылка на исходный GitHub Issue:** [${process.env.ISSUE_URL}](${process.env.ISSUE_URL})\n**Статус задачи:** ${process.env.ISSUE_STATE}`;
+            const htmlContent = marked.parse(fullMarkdown);
+
+            const listRes = await fetch(`${baseUrl}/api/pages?count=500`, { headers });
+            if (!listRes.ok) {
+              throw new Error(`Ошибка получения списка страниц: ${listRes.status} ${await listRes.text()}`);
+            }
+            const listData = await listRes.json();
+            const existingPage = (listData.data || []).find(
+              p => p.book_id === bookId && p.name.startsWith(`#${issueNum} `)
+            );
+
+            if (existingPage) {
+              console.log(`Найдена страница ID=${existingPage.id}. Обновляем...`);
+              const updateRes = await fetch(`${baseUrl}/api/pages/${existingPage.id}`, {
+                method: "PUT",
+                headers,
+                body: JSON.stringify({
+                  name: pageTitle,
+                  html: htmlContent
+                })
+              });
+              if (!updateRes.ok) {
+                throw new Error(`Ошибка обновления страницы: ${updateRes.status} ${await updateRes.text()}`);
+              }
+              console.log("Страница успешно обновлена в BookStack!");
+            } else {
+              console.log("Создаём новую страницу в BookStack...");
+              const createRes = await fetch(`${baseUrl}/api/pages`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                  book_id: bookId,
+                  name: pageTitle,
+                  html: htmlContent
+                })
+              });
+              if (!createRes.ok) {
+                throw new Error(`Ошибка создания страницы: ${createRes.status} ${await createRes.text()}`);
+              }
+              console.log("Новая страница успешно создана в BookStack!");
+            }
+          }
+
+          run().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          '
